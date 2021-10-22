@@ -6,14 +6,8 @@ License: GPLv3 https://www.gnu.org/licenses/gpl-3.0.en.html
 @author: Adrien DEMAREZ
 """
 
-#from lxml import etree as ET #import xml.etree.cElementTree as ET
-#from xmldiff import main as xdiff
-#from xmldiff.actions import UpdateAttrib
-#import xxhash
-
 from zipfile import ZipFile,ZIP_DEFLATED
-import shutil
-import os,sys,re
+import os,re
 import tempfile
 import argparse
 
@@ -22,16 +16,13 @@ def updateZip(zipname, filename, data, destfile=None):
     tmpfd, tmpname = tempfile.mkstemp(dir=os.path.dirname(zipname))
     os.close(tmpfd)
 
-    # create a new zip (tmpname) with everything from zipname exept sub-file filename
     with ZipFile(zipname, 'r') as zin, ZipFile(tmpname, 'w') as zout:
         zout.comment = zin.comment # preserve the comment
         for item in zin.infolist():
             if item.filename != filename:
                 zout.writestr(item, zin.read(item.filename))
-
-    # now add filename with its new data
-    with ZipFile(tmpname, mode='a', compression=ZIP_DEFLATED) as zf:
-        zf.writestr(filename, data)
+            else:
+                zout.writestr(filename, data)
 
     if destfile:
         os.rename(tmpname, destfile)
@@ -40,11 +31,13 @@ def updateZip(zipname, filename, data, destfile=None):
         os.rename(tmpname, zipname)
 
 def docx_remove_protection(docxfile):
+    """Remove protection (e.g. restrictions on formatting, etc) from docx file"""
     xmldata = ZipFile(docxfile).open("word/settings.xml").read().decode()
     xmldata = re.sub("<w:documentProtection .*/>", "", xmldata)
     updateZip(docxfile, "word/settings.xml", xmldata)
 
 def docx_change_authors(docxfile, authorstable, splitdates=False):
+    """Change authors of track changes. authorstable is a dict with entries {'oldauthor1': 'newauthor1', 'oldauthor2': 'newauthor2', ...}"""
     xmldata = ZipFile(docxfile).open("word/document.xml").read().decode()
     for old,new in authorstable.items():
         print(f'Replacing {old} -> {new}')
@@ -52,6 +45,7 @@ def docx_change_authors(docxfile, authorstable, splitdates=False):
     updateZip(docxfile, "word/document.xml", xmldata)
 
 def docx_list_authors(docxfile, splitdates=False):
+    """List authors in track changes. If splitdates==True, the date is appended to author names"""
     xmldata = ZipFile(docxfile).open("word/document.xml").read().decode()
     # = re.compile("w:author=\"(.*?)\"")
     if splitdates==False:
@@ -66,13 +60,11 @@ def docx_list_authors(docxfile, splitdates=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("docfile", help="Docx path")
-    #parser.add_argument("subcommand", help="subcommand")
-    #parser.add_argument("--outfile", "-o", help="Output file", default=None)
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
     parser_removeprot = subparsers.add_parser('remove_protection', help="Remove protection")
     parser_listauth = subparsers.add_parser('list_authors', help="List authors")
     parser_chauth = subparsers.add_parser('change_authors', help='Change authors: "old1" "new1" "old2" "new2"...')
-    parser_chauth.add_argument('authors', nargs='*') #metavar=('old','new'), 
+    parser_chauth.add_argument('authors', nargs='*')
 
     args = parser.parse_args()
     if args.subcommand=='remove_protection':
