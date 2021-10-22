@@ -11,43 +11,40 @@ import os,re
 import tempfile
 import argparse
 
-def updateZip(zipname, filename, data, destfile=None):
+def updateZip(zipname, newfiledata, destfile=None):
     """Update sub-file filename with new data within zipfile. Since updating is not supported, a new archive must be created"""
     tmpfd, tmpname = tempfile.mkstemp(dir=os.path.dirname(zipname))
     os.close(tmpfd)
-
-    with ZipFile(zipname, 'r') as zin, ZipFile(tmpname, 'w') as zout:
+    with ZipFile(zipname, 'r') as zin, ZipFile(tmpname, 'w', compression=ZIP_DEFLATED, compresslevel=5) as zout:
         zout.comment = zin.comment # preserve the comment
         for item in zin.infolist():
-            if item.filename != filename:
-                zout.writestr(item, zin.read(item.filename))
-            else:
-                zout.writestr(filename, data)
-
-    if destfile:
-        os.rename(tmpname, destfile)
-    else:
-        os.remove(zipname)
-        os.rename(tmpname, zipname)
+            zout.writestr(item, newfiledata[item.filename] if item.filename in newfiledata.keys() else zin.read(item.filename))
+    os.replace(tmpname, zipname if destfile==None else destfile)
 
 def docx_remove_protection(docxfile):
     """Remove protection (e.g. restrictions on formatting, etc) from docx file"""
     xmldata = ZipFile(docxfile).open("word/settings.xml").read().decode()
     xmldata = re.sub("<w:documentProtection .*/>", "", xmldata)
-    updateZip(docxfile, "word/settings.xml", xmldata)
+    updateZip(docxfile, {"word/settings.xml": xmldata})
 
 def docx_change_authors(docxfile, authorstable, splitdates=False):
     """Change authors of track changes. authorstable is a dict with entries {'oldauthor1': 'newauthor1', 'oldauthor2': 'newauthor2', ...}"""
-    xmldata = ZipFile(docxfile).open("word/document.xml").read().decode()
+    with ZipFile(docxfile, 'r') as zin:
+        xmldata_document = zin.open("word/document.xml").read().decode()
+        xmldata_comment = zin.open("word/comments.xml").read().decode()
+        xmldata_people = zin.open("word/people.xml").read().decode()
     for old,new in authorstable.items():
         print(f'Replacing {old} -> {new}')
-        xmldata=xmldata.replace(f'w:author="{old}"', f'w:author="{new}"')
-    updateZip(docxfile, "word/document.xml", xmldata)
+        xmldata_document=xmldata_document.replace(f'w:author="{old}"', f'w:author="{new}"')
+        xmldata_comment=xmldata_comment.replace(f'w:author="{old}"', f'w:author="{new}"')
+        xmldata_people=xmldata_people.replace(f'w15:author="{old}"', f'w15:author="{new}"')
+    updateZip(docxfile, {"word/document.xml": xmldata_document,
+                         "word/comments.xml": xmldata_comment,
+                         "word/people.xml": xmldata_people})
 
 def docx_list_authors(docxfile, splitdates=False):
     """List authors in track changes. If splitdates==True, the date is appended to author names"""
     xmldata = ZipFile(docxfile).open("word/document.xml").read().decode()
-    # = re.compile("w:author=\"(.*?)\"")
     if splitdates==False:
         p = re.compile('w:author="(.*?)"')
         author_list = list(set(p.findall(xmldata)))
