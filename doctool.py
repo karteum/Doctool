@@ -31,9 +31,9 @@ def docx_remove_protection(docxfile):
 def docx_change_authors(docxfile, authorstable, outfile=None):
     """Change authors of track changes. authorstable is a dict with entries {'oldauthor1': 'newauthor1', 'oldauthor2': 'newauthor2', ...}"""
     with ZipFile(docxfile, 'r') as zin:
-        xmldata_document = zin.open("word/document.xml").read().decode()
-        xmldata_comment = zin.open("word/comments.xml").read().decode()
-        xmldata_people = zin.open("word/people.xml").read().decode()
+        xmldata_document = zin.open("word/document.xml").read().decode() if "word/document.xml" in zin.namelist() else ""
+        xmldata_comment = zin.open("word/comments.xml").read().decode() if "word/comments.xml" in zin.namelist() else ""
+        xmldata_people = zin.open("word/people.xml").read().decode() if "word/people.xml" in zin.namelist() else ""
     for old,new in authorstable.items():
         print(f'Replacing {old} -> {new}')
         xmldata_document=xmldata_document.replace(f'w:author="{old}"', f'w:author="{new}"')
