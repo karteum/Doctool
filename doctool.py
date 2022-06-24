@@ -73,18 +73,19 @@ def png2jpg(fin,fout):
     # Converts png to jpg using PIL and performing RGBA to RGB conversion with transparent color -> white
     im = Image.open(fin)
     try:
+        if im.mode == "P": im = im.convert('RGBA') # Convert to RGBA first, then will be handled properly
         if im.mode=="RGBA":
             im2 = Image.new('RGB', im.size, (255, 255, 255))
             im2.paste(im, mask=im.split()[3]) # 3 is the alpha channel
             im2.save(fout)
-        elif im.mode == "P":
-            im.convert('RGBA').convert('RGB').save(fout)
         else: im.save(fout)
-        return "ok"
+        return True
     except: # malformed .png files. FIXME: use im.verify()
-        return None
+        return False
 
 def docx_slimfast(docxfile, outfile=None): # FIXME: avoid use of os.system(), which probably could be exploited with a malicious .docx
+    """Reduces the size of the .docx file by converting embedded images : PNG over 30kB are converted to JPG, and EMF are converted first to SVG (using libemf2svg, which seems to produce good quality results). Resulting SVG may be already significantly more lightweight than the original EMF in some case, and if it is still above 600kB the script will rasterize the SVG to JPG. Of course all of this is a lossy compression => use it at your own risk and check the result !"""
+    # TODO: handle charts
     pwd = os.getcwd() ; emf2svg_conv = f"LD_LIBRARY_PATH={pwd} {pwd}/emf2svg-conv" # https://github.com/kakwa/libemf2svg
     deleted=[]
     newfiledata = {}
@@ -94,8 +95,8 @@ def docx_slimfast(docxfile, outfile=None): # FIXME: avoid use of os.system(), wh
         for afile in zin.infolist():
             path, ext = os.path.splitext(afile.filename)
             bname = os.path.basename(path)
-            fin = zin.extract(afile.filename, path=extract_dir)
             if ext.lower() == ".emf":
+                fin = zin.extract(afile.filename, path=extract_dir)
                 svgfile = f"{extract_dir}/{path}.svg"
                 os.system(f"{emf2svg_conv} --input {fin} --output {svgfile}") # FIXME: replace this quick hack with something not using os.system()
                 if os.stat(svgfile).st_size > maxsize and afile.file_size > maxsize:
@@ -108,19 +109,16 @@ def docx_slimfast(docxfile, outfile=None): # FIXME: avoid use of os.system(), wh
                     deleted.append(afile.filename)
                     xmldata_rels = xmldata_rels.replace(bname+ext, bname+".svg")
                     newfiledata[path+".svg"] = open(f"{extract_dir}/{path}.svg", "rb").read()
-            elif ext.lower() == ".png":
+            elif ext.lower() == ".png" and afile.file_size > 30000:
+                fin = zin.extract(afile.filename, path=extract_dir)
                 #os.system(f"zopflipng -y --lossy_8bit {fin} {fin}")
                 #os.system(f"pngcrush -ow {fin}")
-                ret = png2jpg(fin, f"{extract_dir}/{path}.jpg")
                 deleted.append(afile.filename)
-                if ret != None:
+                if png2jpg(fin, f"{extract_dir}/{path}.jpg"):
                     xmldata_rels = xmldata_rels.replace(bname+ext, bname+".jpg")
                     newfiledata[path+".jpg"] = open(f"{extract_dir}/{path}.jpg", "rb").read()
-        with open(extract_dir + "/word/_rels/document.xml.rels", "w") as fh:
-            fh.write(xmldata_rels)
         newfiledata["word/_rels/document.xml.rels"] = xmldata_rels
     zip_update(docxfile, newfiledata, destfile=outfile, deleted=deleted)
-    return deleted, newfiledata
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
