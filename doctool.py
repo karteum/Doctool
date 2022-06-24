@@ -7,7 +7,7 @@ License: GPLv3 https://www.gnu.org/licenses/gpl-3.0.en.html
 @author: Adrien DEMAREZ
 """
 
-from zipfile import ZipFile,ZIP_DEFLATED
+from zipfile import ZipFile,ZIP_DEFLATED,BadZipFile
 import os,re
 import tempfile
 import argparse
@@ -29,7 +29,10 @@ def zip_update(zipname, newfiledata, destfile=None, deleted=[]):
                 zout.writestr(item, newfiledata[item.filename])
                 del newfiledata[item.filename]
             else:
-                zout.writestr(item, zin.read(item.filename))
+                try:
+                    zout.writestr(item, zin.read(item.filename))
+                except BadZipFile:
+                    print(f"__ Error on file {item.filename}")
         for remaining in newfiledata.keys():
             zout.writestr(remaining, newfiledata[remaining])
     os.replace(tmpname, zipname if destfile==None else destfile)
