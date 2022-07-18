@@ -12,6 +12,9 @@ import os,re
 import tempfile
 import argparse
 from PIL import Image
+import sys
+from glob import glob
+import shutil
 #import base64
 #def docx_b64decode(b64bstring):
 #    return base64.b64decode(b64bstring.replace(b'#xA;',b'\n') + b'==')
@@ -29,13 +32,14 @@ def zip_update(zipname, newfiledata, destfile=None, deleted=[]):
                 zout.writestr(item, newfiledata[item.filename])
                 del newfiledata[item.filename]
             else:
-                try:
-                    zout.writestr(item, zin.read(item.filename))
+                try: zout.writestr(item, zin.read(item.filename))
                 except BadZipFile:
-                    print(f"__ Error on file {item.filename}")
+                    print(f"\n__ Error on file {item.filename}")
+                    zout.writestr(item, "_error_") # FIXME: force extract the partial/corrupted file
         for remaining in newfiledata.keys():
             zout.writestr(remaining, newfiledata[remaining])
-    os.replace(tmpname, zipname if destfile==None else destfile)
+    #os.replace(tmpname, zipname if destfile==None else destfile)
+    shutil.move(tmpname, zipname if destfile==None else destfile)
 
 def docx_remove_protection(docxfile):
     """Remove protection (e.g. restrictions on formatting, etc) from docx file"""
@@ -86,42 +90,82 @@ def png2jpg(fin,fout):
     except: # malformed .png files. FIXME: use im.verify()
         return False
 
-def docx_slimfast(docxfile, outfile=None): # FIXME: avoid use of os.system(), which probably could be exploited with a malicious .docx
+def docx_slimfast(docxfile, outfile=None, do_png=True, do_emf=True, do_charts=False): # FIXME: avoid use of os.system(), which probably could be exploited with a malicious .docx
     """Reduces the size of the .docx file by converting embedded images : PNG over 30kB are converted to JPG, and EMF are converted first to SVG (using libemf2svg, which seems to produce good quality results). Resulting SVG may be already significantly more lightweight than the original EMF in some case, and if it is still above 600kB the script will rasterize the SVG to JPG. Of course all of this is a lossy compression => use it at your own risk and check the result !"""
     # TODO: handle charts
     pwd = os.getcwd() ; emf2svg_conv = f"LD_LIBRARY_PATH={pwd} {pwd}/emf2svg-conv" # https://github.com/kakwa/libemf2svg
     deleted=[]
     newfiledata = {}
-    maxsize = 600000
     with ZipFile(docxfile, 'r') as zin, tempfile.TemporaryDirectory() as extract_dir:
         xmldata_rels = zin.open("word/_rels/document.xml.rels").read().decode()
         for afile in zin.infolist():
             path, ext = os.path.splitext(afile.filename)
             bname = os.path.basename(path)
-            if ext.lower() == ".emf":
+            if ext.lower() == ".emf" and do_emf==True:
+                sys.stderr.write('1') ; sys.stderr.flush()
                 fin = zin.extract(afile.filename, path=extract_dir)
-                svgfile = f"{extract_dir}/{path}.svg"
-                os.system(f"{emf2svg_conv} --input {fin} --output {svgfile}") # FIXME: replace this quick hack with something not using os.system()
-                if os.stat(svgfile).st_size > maxsize and afile.file_size > maxsize:
-                    # convert to jpg. Lossy but often smaller. Conversion starts from svg since emf2svg_conv works well and other emf rasterizers are often low quality
-                    os.system(f"convert {svgfile} {extract_dir}/{path}.jpg") # FIXME: replace this quick hack with something not using os.system()
+                # Conversion starts from svg since emf2svg_conv works well and other emf rasterizers are often low quality
+                svgfile = f"{extract_dir}/{path}.svg" ; os.system(f"{emf2svg_conv} --input {fin} --output {svgfile}") # FIXME: replace this quick hack with something not using os.system()
+                pngfile = f"{extract_dir}/{path}.png" ; os.system(f"convert {svgfile} {pngfile}") # FIXME: replace this quick hack with something not using os.system()
+                jpgfile = f"{extract_dir}/{path}.jpg" ; png2jpg(pngfile, jpgfile)
+                if 2 * min(os.stat(jpgfile).st_size, os.stat(pngfile).st_size) < afile.file_size: # Only do it if it makes sense from a size perspective
                     deleted.append(afile.filename)
-                    xmldata_rels = xmldata_rels.replace(bname+ext, bname+".jpg")
-                    newfiledata[path+".jpg"] = open(f"{extract_dir}/{path}.jpg", "rb").read()
-                elif os.stat(svgfile).st_size < afile.file_size: # If the emf is smaller than the svg, of course we keep the emf !
-                    deleted.append(afile.filename)
-                    xmldata_rels = xmldata_rels.replace(bname+ext, bname+".svg")
-                    newfiledata[path+".svg"] = open(f"{extract_dir}/{path}.svg", "rb").read()
-            elif ext.lower() == ".png" and afile.file_size > 30000:
+                    if os.stat(jpgfile).st_size * 1.5 < os.stat(pngfile).st_size:
+                        xmldata_rels = xmldata_rels.replace(bname+ext, bname+".jpg")
+                        newfiledata[path+".jpg"] = open(f"{jpgfile}", "rb").read()
+                    else:
+                        xmldata_rels = xmldata_rels.replace(bname+ext, bname+".png")
+                        newfiledata[path+".png"] = open(f"{pngfile}", "rb").read()
+            elif ext.lower() == ".png" and do_png==True: # and afile.file_size > 30000
+                sys.stderr.write('2') ; sys.stderr.flush()
                 fin = zin.extract(afile.filename, path=extract_dir)
                 #os.system(f"zopflipng -y --lossy_8bit {fin} {fin}")
                 #os.system(f"pngcrush -ow {fin}")
-                deleted.append(afile.filename)
-                if png2jpg(fin, f"{extract_dir}/{path}.jpg"):
+                jpgfile = f"{extract_dir}/{path}.jpg"
+                if png2jpg(fin, jpgfile) and os.stat(jpgfile).st_size *1.5 < afile.file_size: # if the jpg is more than 66% of the original png size, then keep the png
                     xmldata_rels = xmldata_rels.replace(bname+ext, bname+".jpg")
                     newfiledata[path+".jpg"] = open(f"{extract_dir}/{path}.jpg", "rb").read()
+                    deleted.append(afile.filename)
+            elif path.startswith('word/charts') and do_charts==True:
+                sys.stderr.write('3') ; sys.stderr.flush()
+                fin = zin.extract(afile.filename, path=extract_dir)
+                #relfile = f'{os.path.dirname(path)}/_rels/{bname}.xml.rels'
+                #rel = zin.extract(relfile, path=extract_dir)
+                chart_img = render_chart(fin, afile.filename)
+            #elif path.startswith('word/charts/_rels'):
+            #    continue
+            #sys.stderr.write('.') ; sys.stderr.flush()
+        xmldata_rels = xmldata_rels.replace('/>', '/>\n')
         newfiledata["word/_rels/document.xml.rels"] = xmldata_rels
+        content_types = zin.open("[Content_Types].xml").read().decode().replace('/>', '/>\n')
+        insert_index = content_types.index("<Default Extension=")
+        if not '<Default Extension="jpg"' in content_types:
+            content_types = content_types[:insert_index] + '<Default Extension="jpg" ContentType="image/jpeg"/>\n' + content_types[insert_index:]
+        if not '<Default Extension="png"' in content_types:
+            content_types = content_types[:insert_index] + '<Default Extension="png" ContentType="image/png"/>\n' + content_types[insert_index:]
+        newfiledata["[Content_Types].xml"] = content_types
     zip_update(docxfile, newfiledata, destfile=outfile, deleted=deleted)
+
+def render_chart(chartfile, chartname):
+    docxparts = {chartname: open(chartfile).read()} # , relname: open(relfile).read()
+    docstring = """<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="5731510" cy="3978910"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="1" name="Objet1"/>
+<wp:cNvGraphicFramePr/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"/>
+</a:graphicData></a:graphic></wp:inline></w:drawing>"""
+    contents_types = f'<Override PartName="/{chartname}" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>'
+    relstring = f'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="{chartname[5:]}"/>'
+    with ZipFile("blank.docx", 'r') as zin:
+        docxparts["word/document.xml"] = zin.open("word/document.xml").read().decode().replace("Test", docstring)
+        docxparts["word/_rels/document.xml.rels"] = zin.open("word/_rels/document.xml.rels").read().decode().replace("</Relationships>", relstring+"\n</Relationships>")
+        docxparts["[Content_Types].xml"] = zin.open("[Content_Types].xml").read().decode().replace("</Types>", contents_types + "\n</Types>")
+
+    #with tempfile.NamedTemporaryFile() as tmpdocx, tempfile.TemporaryDirectory() as extract_dir, tempfile.NamedTemporaryFile() as outimg:
+    tmpdocx = "tmp.docx" ; extract_dir = "foo" ; outimg = "outimg"
+    zip_update("blank.docx", docxparts, destfile=tmpdocx)
+    os.system(f'libreoffice --convert-to "html:HTML" {tmpdocx} --outdir {extract_dir}') # FIXME: replace this quick hack with something not using os.system()
+    gifname = glob(f"{extract_dir}/*.gif")
+    im = Image.open(gifname).save(f"{outimg}.png")
+    return open(f"{outimg}.png").read()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
