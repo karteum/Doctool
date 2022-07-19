@@ -15,14 +15,19 @@ from PIL import Image
 import sys
 from glob import glob
 import shutil
+from time import time
+from flask import Flask, request, send_file, after_this_request
+app=Flask(__name__)
+
 #import base64
 #def docx_b64decode(b64bstring):
 #    return base64.b64decode(b64bstring.replace(b'#xA;',b'\n') + b'==')
 
 def zip_update(zipname, newfiledata, destfile=None, deleted=[]):
+    print(zipname)
     """Update subfiles with new data within zipfile (newfiledata is a dict with {filename: data, ...})"""
     # Unfortunately this can only be done by re-creating the whole zipfile
-    tmpfd, tmpname = tempfile.mkstemp(dir=os.path.dirname(zipname))
+    tmpfd, tmpname = tempfile.mkstemp() # dir=os.path.dirname(zipname)
     os.close(tmpfd)
     with ZipFile(zipname, 'r') as zin, ZipFile(tmpname, 'w', compression=ZIP_DEFLATED, compresslevel=5) as zout:
         zout.comment = zin.comment # preserve the comment
@@ -36,10 +41,14 @@ def zip_update(zipname, newfiledata, destfile=None, deleted=[]):
                 except BadZipFile:
                     print(f"\n__ Error on file {item.filename}")
                     zout.writestr(item, "_error_") # FIXME: force extract the partial/corrupted file
+                    #zout.writestr(item, open("image104.tiff", "rb").read()) # FIXME: force extract the partial/corrupted file
         for remaining in newfiledata.keys():
             zout.writestr(remaining, newfiledata[remaining])
     #os.replace(tmpname, zipname if destfile==None else destfile)
-    shutil.move(tmpname, zipname if destfile==None else destfile)
+    if destfile:
+        shutil.move(tmpname, destfile)
+        return destfile
+    return tmpname
 
 def docx_remove_protection(docxfile):
     """Remove protection (e.g. restrictions on formatting, etc) from docx file"""
@@ -98,11 +107,12 @@ def docx_slimfast(docxfile, outfile=None, do_png=True, do_emf=True, do_charts=Fa
     newfiledata = {}
     with ZipFile(docxfile, 'r') as zin, tempfile.TemporaryDirectory() as extract_dir:
         xmldata_rels = zin.open("word/_rels/document.xml.rels").read().decode()
+        numfiles = len(zin.namelist()) ; k=0
         for afile in zin.infolist():
             path, ext = os.path.splitext(afile.filename)
             bname = os.path.basename(path)
             if ext.lower() == ".emf" and do_emf==True:
-                sys.stderr.write('1') ; sys.stderr.flush()
+                #sys.stderr.write('1') ; sys.stderr.flush()
                 fin = zin.extract(afile.filename, path=extract_dir)
                 # Conversion starts from svg since emf2svg_conv works well and other emf rasterizers are often low quality
                 svgfile = f"{extract_dir}/{path}.svg" ; os.system(f"{emf2svg_conv} --input {fin} --output {svgfile}") # FIXME: replace this quick hack with something not using os.system()
@@ -117,7 +127,7 @@ def docx_slimfast(docxfile, outfile=None, do_png=True, do_emf=True, do_charts=Fa
                         xmldata_rels = xmldata_rels.replace(bname+ext, bname+".png")
                         newfiledata[path+".png"] = open(f"{pngfile}", "rb").read()
             elif ext.lower() == ".png" and do_png==True: # and afile.file_size > 30000
-                sys.stderr.write('2') ; sys.stderr.flush()
+                #sys.stderr.write('2') ; sys.stderr.flush()
                 fin = zin.extract(afile.filename, path=extract_dir)
                 #os.system(f"zopflipng -y --lossy_8bit {fin} {fin}")
                 #os.system(f"pngcrush -ow {fin}")
@@ -127,14 +137,15 @@ def docx_slimfast(docxfile, outfile=None, do_png=True, do_emf=True, do_charts=Fa
                     newfiledata[path+".jpg"] = open(f"{extract_dir}/{path}.jpg", "rb").read()
                     deleted.append(afile.filename)
             elif path.startswith('word/charts') and do_charts==True:
-                sys.stderr.write('3') ; sys.stderr.flush()
+                #sys.stderr.write('3') ; sys.stderr.flush()
                 fin = zin.extract(afile.filename, path=extract_dir)
                 #relfile = f'{os.path.dirname(path)}/_rels/{bname}.xml.rels'
                 #rel = zin.extract(relfile, path=extract_dir)
                 chart_img = render_chart(fin, afile.filename)
             #elif path.startswith('word/charts/_rels'):
             #    continue
-            #sys.stderr.write('.') ; sys.stderr.flush()
+            k+=1
+            sys.stderr.write(f'\r{100*k//numfiles} %') ; sys.stderr.flush()
         xmldata_rels = xmldata_rels.replace('/>', '/>\n')
         newfiledata["word/_rels/document.xml.rels"] = xmldata_rels
         content_types = zin.open("[Content_Types].xml").read().decode().replace('/>', '/>\n')
@@ -144,7 +155,7 @@ def docx_slimfast(docxfile, outfile=None, do_png=True, do_emf=True, do_charts=Fa
         if not '<Default Extension="png"' in content_types:
             content_types = content_types[:insert_index] + '<Default Extension="png" ContentType="image/png"/>\n' + content_types[insert_index:]
         newfiledata["[Content_Types].xml"] = content_types
-    zip_update(docxfile, newfiledata, destfile=outfile, deleted=deleted)
+    return zip_update(docxfile, newfiledata, destfile=outfile, deleted=deleted)
 
 def render_chart(chartfile, chartname):
     docxparts = {chartname: open(chartfile).read()} # , relname: open(relfile).read()
@@ -167,6 +178,35 @@ def render_chart(chartfile, chartname):
     im = Image.open(gifname).save(f"{outimg}.png")
     return open(f"{outimg}.png").read()
 
+
+############## Web UI
+
+@app.route('/', methods = ['GET', 'POST'])
+def ui_root():    
+    if request.method == 'GET':
+        return """<html><head><title>Karteum's Docx slimfast</title>
+<style>body { font-family:sans-serif; background-color: #DFDBE5; }</style></head>
+<body>
+
+<h1>Karteum's Docx slimfast</h1>
+<i>Work in progress, one single connection at a time, slow implementation: wait up to one minute after clicking "send"...</i>
+<form action="http://localhost:5000/" method="POST" enctype="multipart/form-data" target="_blank">
+<label for="legacy">Original docx file : </label><input type="file" name="docx_file" id="docx" /><br>
+<br><input type="submit" name="action" value="Send" />
+</form>
+
+</body></html>"""
+
+    if request.files['docx_file']:
+        docx_file = request.files['docx_file']
+        docx_mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        docx_newfile = docx_slimfast(docx_file)
+        @after_this_request
+        def remove_file(response):
+            os.remove(docx_newfile)
+            return response
+        return send_file(docx_newfile, docx_mime, as_attachment=True, attachment_filename=f"docx_slimfast_{int(time())}.docx")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("docfile", help="Docx path")
@@ -178,6 +218,7 @@ if __name__ == "__main__":
     parser_chauth.add_argument('authors', nargs='*')
     parser_slimfast = subparsers.add_parser('slimfast', help="make the docx more lightweight (lossy compression on pictures)")
     parser_slimfast.add_argument('-o', '--outputfile', help='Output file name', default=None)
+    parser_web = subparsers.add_parser('web', help="Web interface")
 
     args = parser.parse_args()
     if args.subcommand=='remove_protection':
@@ -191,3 +232,10 @@ if __name__ == "__main__":
         docx_change_authors(args.docfile, authlist,outfile=args.outputfile)
     elif args.subcommand=='slimfast':
         docx_slimfast(args.docfile, outfile=args.outputfile)
+    elif args.subcommand=='web':
+        #os.environ['FLASK_ENV']="development"
+        #app.testing = True
+        #app.debug = True
+        print('Launch on port 5000')
+        app.run(port=5000, debug=True, use_reloader=False)
+        sys.exit(0)
