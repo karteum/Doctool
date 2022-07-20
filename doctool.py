@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 # -*- coding: utf-8 -*-
 """
 Created on Fri Oct 22 14:19:13 2021
@@ -97,6 +97,7 @@ def png2jpg(fin,fout):
         else: im.save(fout)
         return True
     except: # malformed .png files. FIXME: use im.verify()
+        print(" error png2jpg")
         return False
 
 def docx_slimfast(docxfile, outfile=None, do_png=True, do_emf=True, do_charts=False): # FIXME: avoid use of os.system(), which probably could be exploited with a malicious .docx
@@ -112,11 +113,11 @@ def docx_slimfast(docxfile, outfile=None, do_png=True, do_emf=True, do_charts=Fa
             path, ext = os.path.splitext(afile.filename)
             bname = os.path.basename(path)
             if ext.lower() == ".emf" and do_emf==True:
-                #sys.stderr.write('1') ; sys.stderr.flush()
                 fin = zin.extract(afile.filename, path=extract_dir)
                 # Conversion starts from svg since emf2svg_conv works well and other emf rasterizers are often low quality
                 svgfile = f"{extract_dir}/{path}.svg" ; os.system(f"{emf2svg_conv} --input {fin} --output {svgfile}") # FIXME: replace this quick hack with something not using os.system()
-                pngfile = f"{extract_dir}/{path}.png" ; os.system(f"convert {svgfile} {pngfile}") # FIXME: replace this quick hack with something not using os.system()
+                pngfile = f"{extract_dir}/{path}.png" ; os.system(f"inkscape {svgfile} --export-type=png 2>/dev/null")
+                #os.system(f"convert {svgfile} {pngfile}") # FIXME: replace this quick hack with something not using os.system()
                 jpgfile = f"{extract_dir}/{path}.jpg" ; png2jpg(pngfile, jpgfile)
                 if 2 * min(os.stat(jpgfile).st_size, os.stat(pngfile).st_size) < afile.file_size: # Only do it if it makes sense from a size perspective
                     deleted.append(afile.filename)
@@ -127,7 +128,6 @@ def docx_slimfast(docxfile, outfile=None, do_png=True, do_emf=True, do_charts=Fa
                         xmldata_rels = xmldata_rels.replace(bname+ext, bname+".png")
                         newfiledata[path+".png"] = open(f"{pngfile}", "rb").read()
             elif ext.lower() == ".png" and do_png==True: # and afile.file_size > 30000
-                #sys.stderr.write('2') ; sys.stderr.flush()
                 fin = zin.extract(afile.filename, path=extract_dir)
                 #os.system(f"zopflipng -y --lossy_8bit {fin} {fin}")
                 #os.system(f"pngcrush -ow {fin}")
@@ -137,7 +137,6 @@ def docx_slimfast(docxfile, outfile=None, do_png=True, do_emf=True, do_charts=Fa
                     newfiledata[path+".jpg"] = open(f"{extract_dir}/{path}.jpg", "rb").read()
                     deleted.append(afile.filename)
             elif path.startswith('word/charts') and do_charts==True:
-                #sys.stderr.write('3') ; sys.stderr.flush()
                 fin = zin.extract(afile.filename, path=extract_dir)
                 #relfile = f'{os.path.dirname(path)}/_rels/{bname}.xml.rels'
                 #rel = zin.extract(relfile, path=extract_dir)
@@ -145,7 +144,7 @@ def docx_slimfast(docxfile, outfile=None, do_png=True, do_emf=True, do_charts=Fa
             #elif path.startswith('word/charts/_rels'):
             #    continue
             k+=1
-            sys.stderr.write(f'\r{100*k//numfiles} %') ; sys.stderr.flush()
+            sys.stderr.write(f'\r\033[2K{100*k//numfiles} % : {afile.filename}') ; sys.stderr.flush()
         xmldata_rels = xmldata_rels.replace('/>', '/>\n')
         newfiledata["word/_rels/document.xml.rels"] = xmldata_rels
         content_types = zin.open("[Content_Types].xml").read().decode().replace('/>', '/>\n')
@@ -184,27 +183,34 @@ def render_chart(chartfile, chartname):
 @app.route('/', methods = ['GET', 'POST'])
 def ui_root():    
     if request.method == 'GET':
-        return """<html><head><title>Karteum's Docx slimfast</title>
+        return """<html><head><title>Docx diet</title>
 <style>body { font-family:sans-serif; background-color: #DFDBE5; }</style></head>
 <body>
 
-<h1>Karteum's Docx slimfast</h1>
-<i>Work in progress, one single connection at a time, slow implementation: wait up to one minute after clicking "send"...</i>
-<form action="http://localhost:5000/" method="POST" enctype="multipart/form-data" target="_blank">
-<label for="legacy">Original docx file : </label><input type="file" name="docx_file" id="docx" /><br>
-<br><input type="submit" name="action" value="Send" />
+<h1>Docx diet</h1>
+<img src="https://secretnews.fr/wp-content/uploads/2018/03/michel-ange-david-obese-gros.jpg" align="right" width="30%" style="transform: scaleX(-1);">
+<i>Work in progress, non-multithreaded test server i.e. one single connection at a time, slow implementation (especially when processing EMF): wait up to one minute after clicking "send"...</i>
+<form action="https://ksufi.karteum.ovh/docxdiet" method="POST" enctype="multipart/form-data" target="_blank"><br>
+<label for="docx_file">Original docx file : </label><input type="file" name="docx_file" id="docx" /><br>
+<input type="checkbox" id="do_png" name="do_png" checked><label for="do_png">PNG->JPG (slightly lossy)</label><br>
+<input type="checkbox" id="do_emf" name="do_emf"><label for="do_emf">EMF->SVG->PNG (possibly lossy if bugs in rasterizer. Need double-check on result)</label><br>
+<input type="submit" name="action" value="Send" />
 </form>
 
 </body></html>"""
 
     if request.files['docx_file']:
         docx_file = request.files['docx_file']
-        docx_mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        docx_newfile = docx_slimfast(docx_file)
+        do_png = True if "do_png" in request.form and request.form["do_png"]=="on" else False
+        do_emf = True if "do_emf" in request.form and request.form["do_emf"]=="on" else False
+        docx_newfile = docx_slimfast(docx_file, do_png=do_png, do_emf=do_emf)
+
         @after_this_request
         def remove_file(response):
             os.remove(docx_newfile)
             return response
+
+        docx_mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
         return send_file(docx_newfile, docx_mime, as_attachment=True, attachment_filename=f"docx_slimfast_{int(time())}.docx")
 
 if __name__ == "__main__":
@@ -237,5 +243,5 @@ if __name__ == "__main__":
         #app.testing = True
         #app.debug = True
         print('Launch on port 5000')
-        app.run(port=5000, debug=True, use_reloader=False)
+        app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
         sys.exit(0)
